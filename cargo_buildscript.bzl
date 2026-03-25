@@ -19,8 +19,16 @@
 #     buildscript_genrule = "buildscript_run"
 #
 
+load("@prelude//cxx:cxx_toolchain_types.bzl", "CxxToolchainInfo")
+load(
+    "@prelude//cxx:preprocessor.bzl",
+    "cxx_inherited_preprocessor_infos",
+    "cxx_merge_cpreprocessors",
+)
+load("@prelude//cxx:target_sdk_version.bzl", "get_target_triple")
 load("@prelude//decls:common.bzl", "buck")
 load("@prelude//decls:toolchains_common.bzl", "toolchains_common")
+load("@prelude//linking:link_info.bzl", "LinkInfosTSet", "LinkStrategy", "MergedLinkInfo")
 load("@prelude//os_lookup:defs.bzl", "Os", "OsLookup")
 load("@prelude//rust:rust_toolchain.bzl", "RustToolchainInfo")
 load("@prelude//rust:targets.bzl", "targets")
@@ -99,6 +107,22 @@ def _make_rustc_shim(ctx: AnalysisContext, cwd: Artifact) -> cmd_args:
 
     return cmd_args(shim, relative_to = cwd)
 
+def _make_cc_shim(ctx: AnalysisContext, name: str, cmd: cmd_args, cwd: Artifact) -> cmd_args:
+    """Wrap a C/C++ compiler command so build scripts can invoke it from cwd.
+
+    Build scripts set CC/CXX/LD/AR to these shims. When the target platform
+    differs from the exec platform (cross-compilation), the shim ensures the
+    compiler is invoked with the correct flags (e.g. --target) regardless of
+    the directory the build script chooses to run it from.
+    """
+    shim = cmd_script(
+        actions = ctx.actions,
+        name = name,
+        cmd = cmd_args(cmd, relative_to = cwd),
+        language = ctx.attrs._exec_os_type[OsLookup].script,
+    )
+    return cmd_args(shim, relative_to = cwd)
+
 def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
     toolchain_info = ctx.attrs._rust_toolchain[RustToolchainInfo]
 
@@ -170,6 +194,101 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
             if opt_level.isdigit():
                 env["OPT_LEVEL"] = opt_level
 
+    # C and C++ compilers for build scripts that need them (bindgen, cc crate,
+    # protoc plugins, etc.). The target triple ensures cross-compilation works:
+    # build scripts run on the exec (host) platform but compile C/C++ code for
+    # the target platform.
+    cxx_toolchain_info = ctx.attrs._cxx_toolchain[CxxToolchainInfo]
+
+    # get_target_triple is Apple-specific; fall back to the Rust toolchain's
+    # target triple so that non-Apple cross-compilation also gets --target=.
+    target_triple = get_target_triple(ctx)
+    if target_triple == None and toolchain_info.rustc_target_triple:
+        target_triple = toolchain_info.rustc_target_triple
+
+    # Detect compiler family so we only pass flags the compiler understands.
+    # compiler_type values: "clang", "gcc", "windows" (cl.exe), "clang_cl", "windows_ml64", "nasm"
+    c_compiler_type = cxx_toolchain_info.c_compiler_info.compiler_type
+    is_msvc = c_compiler_type in ("windows", "windows_ml64")
+    is_clang = c_compiler_type in ("clang", "clang_cl")
+
+    preprocessor = cxx_merge_cpreprocessors(
+        ctx.actions,
+        [],
+        cxx_inherited_preprocessor_infos(ctx.attrs.cxx_deps),
+    )
+    deps_preprocessor_flags = preprocessor.set.project_as_args("args")
+    deps_tset = ctx.actions.tset(
+        LinkInfosTSet,
+        children = [
+            dep[MergedLinkInfo]._infos[LinkStrategy("static_pic")]
+            for dep in ctx.attrs.cxx_deps
+        ],
+    )
+    deps_link = deps_tset.project_as_args("default")
+
+    # For MSVC targets, don't set CC/CXX/LD/AR — let the `cc` crate auto-detect
+    # cl.exe from PATH. Setting CC to a .bat shim confuses the cc crate's compiler
+    # detection (it checks the filename to determine gcc vs MSVC) and causes it to
+    # emit gcc-style flags (-ffunction-sections, -O0) that cl.exe rejects.
+    #
+    # For gcc/clang targets, set explicit shims with cross-compilation flags.
+    if not is_msvc:
+        sanitizer_flags = ["-fno-sanitize=all"]
+
+        env["LD"] = _make_cc_shim(
+            ctx = ctx,
+            name = "__ld_shim",
+            cmd = cmd_args(
+                cxx_toolchain_info.linker_info.linker,
+                cxx_toolchain_info.linker_info.linker_flags or [],
+                toolchain_info.linker_flags,
+                sanitizer_flags,
+            ),
+            cwd = cwd,
+        )
+
+        cc_extra_flags = []
+        if is_clang:
+            cc_extra_flags.append(cmd_args(env["LD"], format = "--ld-path={}"))
+        if target_triple:
+            cc_extra_flags.append("--target={}".format(target_triple))
+
+        env["CC"] = _make_cc_shim(
+            ctx = ctx,
+            name = "__cc_shim",
+            cmd = cmd_args(
+                cxx_toolchain_info.c_compiler_info.compiler,
+                cc_extra_flags,
+                cxx_toolchain_info.c_compiler_info.compiler_flags,
+                deps_preprocessor_flags,
+                deps_link,
+                sanitizer_flags,
+                ctx.attrs.cxx_flags,
+            ),
+            cwd = cwd,
+        )
+        env["CXX"] = _make_cc_shim(
+            ctx = ctx,
+            name = "__cxx_shim",
+            cmd = cmd_args(
+                cxx_toolchain_info.cxx_compiler_info.compiler,
+                cc_extra_flags,
+                cxx_toolchain_info.cxx_compiler_info.compiler_flags,
+                deps_preprocessor_flags,
+                deps_link,
+                sanitizer_flags,
+                ctx.attrs.cxx_flags,
+            ),
+            cwd = cwd,
+        )
+        env["AR"] = _make_cc_shim(
+            ctx = ctx,
+            name = "__ar_shim",
+            cmd = cmd_args(cxx_toolchain_info.linker_info.archiver),
+            cwd = cwd,
+        )
+
     # Environment variables specified in the target's attributes get priority
     # over all the above.
     for k, v in ctx.attrs.env.items():
@@ -194,6 +313,8 @@ _cargo_buildscript_rule = rule(
     impl = _cargo_buildscript_impl,
     attrs = {
         "buildscript": attrs.exec_dep(providers = [RunInfo]),
+        "cxx_deps": attrs.list(attrs.dep(), default = []),
+        "cxx_flags": attrs.list(attrs.arg(), default = []),
         "env": attrs.dict(key = attrs.string(), value = attrs.arg(), default = {}),
         # *BUCKAL-ONLY* list of environment variable source files to set for the buildscript
         "env_srcs": attrs.list(attrs.dep(), default = []),
@@ -207,6 +328,7 @@ _cargo_buildscript_rule = rule(
         "rustc_cfg": attrs.dep(default = "prelude//rust/tools:rustc_cfg"),
         "rustc_host_tuple": attrs.dep(default = "prelude//rust/tools:rustc_host_tuple"),
         "version": attrs.string(),
+        "_cxx_toolchain": toolchains_common.cxx(),
         "_exec_os_type": buck.exec_os_type_arg(),
         "_rust_internal_tools_toolchain": attrs.default_only(
             attrs.toolchain_dep(default = "prelude//rust/tools:internal_tools_toolchain"),
