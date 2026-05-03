@@ -236,21 +236,15 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
     if not is_msvc:
         sanitizer_flags = ["-fno-sanitize=all"]
 
-        env["LD"] = _make_cc_shim(
-            ctx = ctx,
-            name = "__ld_shim",
-            cmd = cmd_args(
-                cxx_toolchain_info.linker_info.linker,
-                cxx_toolchain_info.linker_info.linker_flags or [],
-                toolchain_info.linker_flags,
-                sanitizer_flags,
-            ),
-            cwd = cwd,
-        )
-
+        # Don't set env["LD"] and don't wire `--ld-path=` into CC: the project
+        # toolchain's `linker_info.linker` is typically a C/C++ driver
+        # (clang++/g++), but the LD env var and clang's `--ld-path=` both
+        # expect a *raw* linker (`ld`). When clang invokes a driver as if it
+        # were ld, it passes raw ld-style flags (`--hash-style=gnu`,
+        # `-m elf_x86_64`, `--as-needed`, ...) that the driver rejects.
+        # Build scripts that need a linker fall back to clang's default ld
+        # (resolved via -fuse-ld=... in cflags or PATH ld), which works.
         cc_extra_flags = []
-        if is_clang:
-            cc_extra_flags.append(cmd_args(env["LD"], format = "--ld-path={}"))
         if target_triple:
             cc_extra_flags.append("--target={}".format(target_triple))
 
