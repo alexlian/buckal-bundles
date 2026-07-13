@@ -101,59 +101,108 @@ def _merge_os_deps(default_deps, os_deps):
 
     def merge(base):
         base_list = list(base)
-        def add_extras(extra):
-            return base_list + list(extra)
         select_map = {"DEFAULT": base_list}
-        for os_key, extras in os_deps.items():
-            select_map[_platform_label(os_key)] = selects.apply(extras, add_extras)
+        for key in sorted(os_deps):
+            select_map[_platform_label(key)] = _branch_deps(base_list, os_deps, key)
         return select(select_map)
 
     return selects.apply(default_deps, merge)
 
+def _branch_deps(base_list, os_deps, key):
+    def concat(*extras):
+        merged = list(base_list)
+        for extra in extras:
+            merged = merged + list(extra)
+        return merged
+
+    return selects.apply_n(_inherited_keys(os_deps, key), concat)
+
+def _inherited_keys(os_deps, key):
+    """The os_deps values a `key` branch must contribute, least-specific first.
+
+    Buck2 picks exactly one select branch — it does not union the branches that
+    match. So a refined branch has to carry the OS-level deps too, or a crate
+    with both a `cfg(unix)` dep and a `cfg(all(aarch64, linux))` dep would lose
+    the former on linux-arm64.
+    """
+    os_key = _os_of(key)
+    if key != os_key and os_key in os_deps:
+        return [os_deps[os_key], os_deps[key]]
+    return [os_deps[key]]
+
 def _merge_os_named_deps(default_named, os_named_deps):
-    # os_named_deps is alias-first: {"alias": {"linux": "//:dep", "windows": "//:dep"}}.
+    # os_named_deps is alias-first: {"alias": {"linux": "//:dep", "linux-arm64": "//:dep"}}.
     if not os_named_deps:
         return default_named
 
     def merge(base):
         base_dict = dict(base)
-        os_keys = set()
+        keys = set()
         for per_os in os_named_deps.values():
-            os_keys.update(per_os.keys())
+            keys.update(per_os.keys())
 
-        def apply_named_dep(curr, alias, value):
-            def set_alias(v):
-                merged = dict(curr)
-                merged[alias] = v
-                return merged
-            return selects.apply(value, set_alias)
-
-        def named_for(os_key):
+        def named_for(key):
             merged = base_dict
             for alias, per_os in os_named_deps.items():
-                if os_key in per_os:
-                    merged = selects.apply(
-                        merged,
-                        lambda curr: apply_named_dep(curr, alias, per_os[os_key]),
-                    )
+                # Same inheritance as _inherited_keys: a refined branch takes the
+                # alias's OS-level target unless the alias overrides it for this
+                # exact platform.
+                value = per_os.get(key, per_os.get(_os_of(key)))
+                if value != None:
+                    merged = _set_named_dep(merged, alias, value)
             return merged
 
         select_map = {"DEFAULT": base_dict}
-        for os_key in os_keys:
-            select_map[_platform_label(os_key)] = named_for(os_key)
+        for key in sorted(keys):
+            select_map[_platform_label(key)] = named_for(key)
 
         return select(select_map)
 
     return selects.apply(default_named, merge)
 
-def _platform_label(os_key):
-    mapping = {
-        # Map OS keys to canonical prelude constraint labels so `select()`
-        # matches repos that define platforms with `prelude//os/constraints:*`.
-        "linux": "prelude//os/constraints:linux",
-        "macos": "prelude//os/constraints:macos",
-        "windows": "prelude//os/constraints:windows",
-    }
-    if os_key in mapping:
-        return mapping[os_key]
-    fail("Unsupported OS key %s. Expected one of: %s" % (os_key, ", ".join(sorted(mapping.keys()))))
+def _set_named_dep(named, alias, value):
+    def set_alias(curr, target):
+        merged = dict(curr)
+        merged[alias] = target
+        return merged
+
+    return selects.apply_n([named, value], set_alias)
+
+# A platform key is either an OS name (`linux`) or an OS/CPU pair
+# (`linux-arm64`). buckal emits the bare OS key when a dependency applies to
+# every supported CPU of that OS, and the refined key when it does not — e.g.
+# `cpufeatures` needs `libc` only on aarch64 Linux, which an OS-keyed map cannot
+# express at all.
+_OS_LABELS = {
+    "linux": "prelude//os/constraints:linux",
+    "macos": "prelude//os/constraints:macos",
+    "windows": "prelude//os/constraints:windows",
+}
+
+_PLATFORM_LABELS = {
+    "linux-arm64": "buckal//platforms:linux-arm64",
+    "linux-x86_64": "buckal//platforms:linux-x86_64",
+    "macos-arm64": "buckal//platforms:macos-arm64",
+    "macos-x86_64": "buckal//platforms:macos-x86_64",
+    "windows-arm64": "buckal//platforms:windows-arm64",
+    "windows-x86_64": "buckal//platforms:windows-x86_64",
+}
+
+def _os_of(key):
+    # CPU names contain `_` (`x86_64`) but never `-`, so the first `-` is the
+    # OS/CPU boundary.
+    return key.split("-")[0]
+
+def _platform_label(key):
+    # Both an OS key and a refined key can match the same platform; Buck2 resolves
+    # that by refinement, preferring the config_setting whose constraints are a
+    # strict superset. That is why the refined branch must be complete — see
+    # _inherited_keys.
+    if key in _OS_LABELS:
+        return _OS_LABELS[key]
+    if key in _PLATFORM_LABELS:
+        return _PLATFORM_LABELS[key]
+    fail("Unsupported platform key %s. Expected one of: %s" % (
+        key,
+        ", ".join(sorted(_OS_LABELS.keys() + _PLATFORM_LABELS.keys())),
+    ))
