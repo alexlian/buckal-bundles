@@ -198,6 +198,18 @@ def run_buildscript(
         sys.exit(ex.returncode)
 
 
+def normalize_project_relative_tool_paths(env: Dict[str, str]) -> None:
+    """Make Buck-generated tool shims independent of a build script cwd."""
+    for key in ("AR", "CC", "CXX", "LD"):
+        value = env.get(key)
+        if value is None or os.path.isabs(value):
+            continue
+
+        candidate = os.path.join(TOOL_CWD, value)
+        if os.path.exists(candidate):
+            env[key] = os.path.abspath(candidate)
+
+
 class Args(NamedTuple):
     buildscript: str
     rustc_cfg: Path
@@ -251,6 +263,7 @@ def main() -> None:  # noqa: C901
     # Merge the current process environment. Values from os.environ take
     # precedence over values from cfg_env()/extra env files.
     env = dict(os.environ, **env)
+    normalize_project_relative_tool_paths(env)
     # NUM_JOBS is only set to available_parallelism() if not already present,
     # meaning an existing OS-level NUM_JOBS overrides cargo_buildscript.bzl config.
     env.setdefault("NUM_JOBS", str(available_parallelism()))
