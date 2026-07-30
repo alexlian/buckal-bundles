@@ -161,7 +161,8 @@ def _make_cc_shim(ctx: AnalysisContext, name: str, cmd: cmd_args) -> cmd_args:
 
     language = ctx.attrs._exec_os_type[OsLookup].script
     if language == ScriptLanguage("sh"):
-        script = ctx.actions.declare_output("{}.sh".format(name), has_content_based_path = False)
+        script_name = "ld" if name == "__ld_shim" else "{}.sh".format(name)
+        script = ctx.actions.declare_output(script_name, has_content_based_path = False)
         wrapper, _ = ctx.actions.write(
             script,
             [
@@ -182,9 +183,10 @@ def _make_cc_shim(ctx: AnalysisContext, name: str, cmd: cmd_args) -> cmd_args:
                     ),
                     # For linker, prepend every argument with `-Wl,`. Without this,
                     # when using Clang for the linker, arguments are intercepted
-                    # by Clang instead of making it to the actual linker.
-                    # >> clang++: error: unknown argument: '--as-needed'
-                    format = '{} "${@/#/-Wl,}"\n' if name == "__ld_shim" else '{} "$@"\n',
+                    # by Clang instead of making it to the actual linker. Suppress
+                    # the compiler driver's implicit startup objects because the
+                    # original linker invocation already contains them.
+                    format = '{} -nostdlib "${@/#/-Wl,}"\n' if name == "__ld_shim" else '{} "$@"\n',
                 ),
             ],
             is_executable = True,
@@ -324,11 +326,17 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
             sanitizer_flags,
         ),
     )
+    compiler_linker = (
+        cmd_args(env["LD"], parent = 1, format = "-B{}")
+        if ctx.attrs._exec_os_type[OsLookup].script == ScriptLanguage("sh")
+        else cmd_args(env["LD"], format = "--ld-path={}")
+    )
     env["CC"] = _make_cc_shim(
         ctx = ctx,
         name = "__cc_shim",
         cmd = cmd_args(
             cxx_toolchain_info.c_compiler_info.compiler,
+            compiler_linker,
             cxx_toolchain_info.c_compiler_info.preprocessor_flags,
             cxx_toolchain_info.c_compiler_info.compiler_flags,
             deps_preprocessor_flags,
@@ -343,6 +351,7 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
         name = "__cxx_shim",
         cmd = cmd_args(
             cxx_toolchain_info.cxx_compiler_info.compiler,
+            compiler_linker,
             cxx_toolchain_info.cxx_compiler_info.preprocessor_flags,
             cxx_toolchain_info.cxx_compiler_info.compiler_flags,
             deps_preprocessor_flags,
