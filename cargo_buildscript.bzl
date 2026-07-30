@@ -178,7 +178,11 @@ def _make_cc_shim(ctx: AnalysisContext, name: str, cmd: cmd_args) -> cmd_args:
                     cmd_args(
                         cmd_args(internal_tools_info.from_any_dir, quote = "shell"),
                         '--cwd="${cc_original_dir}"',
-                        cmd_args("/usr/bin/env", cmd_args(cmd, absolute_prefix = "${..}/", quote = "shell")),
+                        cmd_args(
+                            "/usr/bin/env",
+                            ["-u", "COMPILER_PATH"] if name == "__ld_shim" else [],
+                            cmd_args(cmd, absolute_prefix = "${..}/", quote = "shell"),
+                        ),
                         delimiter = " \\\n",
                     ),
                     # For linker, prepend every argument with `-Wl,`. Without this,
