@@ -322,9 +322,9 @@ def main() -> None:  # noqa: C901
             path = cargo_rustc_link_search_match.group(2)
             if path.startswith(TOOL_CWD):
                 relative_path = path[len(TOOL_CWD) :]
-                flags += f"-L{kind}$(abspath {relative_path})\n"
+                flags += f"-L{kind}{relative_path}\n"
             else:
-                # Disregard link search not located within the build script's out dir.
+                # Disregard link-search paths that cannot be resolved from the project root.
                 pass
             continue
         # *BUCKAL-ONLY* metadata processing

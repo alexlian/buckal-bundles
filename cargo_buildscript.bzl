@@ -177,7 +177,7 @@ def _make_cc_shim(ctx: AnalysisContext, name: str, cmd: cmd_args) -> cmd_args:
                     cmd_args(
                         cmd_args(internal_tools_info.from_any_dir, quote = "shell"),
                         '--cwd="${cc_original_dir}"',
-                        cmd_args(cmd, absolute_prefix = "${..}/", quote = "shell"),
+                        cmd_args("/usr/bin/env", cmd_args(cmd, absolute_prefix = "${..}/", quote = "shell")),
                         delimiter = " \\\n",
                     ),
                     # For linker, prepend every argument with `-Wl,`. Without this,
@@ -230,7 +230,7 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
     rust_toolchain_info = ctx.attrs._rust_toolchain[RustToolchainInfo]
 
     cwd = ctx.actions.declare_output("cwd", dir = True, has_content_based_path = True)
-    out_dir = ctx.actions.declare_output("OUT_DIR", dir = True, has_content_based_path = True)
+    out_dir = ctx.actions.declare_output("OUT_DIR", dir = True)
     rustc_flags = ctx.actions.declare_output("rustc_flags", has_content_based_path = True)
     # *BUCKAL-ONLY* metadata environment variables for *dependent* buildscript runners to consume
     metadata = ctx.actions.declare_output("METADATA")
@@ -375,7 +375,12 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
         default_output = None,
         sub_targets = {
             "out_dir": [DefaultInfo(default_output = out_dir)],
-            "rustc_flags": [DefaultInfo(default_output = rustc_flags)],
+            "rustc_flags": [DefaultInfo(
+                default_output = rustc_flags,
+                # Keep the generated native artifacts as hidden inputs when this
+                # response file is consumed through $(location ...[rustc_flags]).
+                other_outputs = [out_dir],
+            )],
             "metadata": [DefaultInfo(default_output = metadata)],
         },
     )]
