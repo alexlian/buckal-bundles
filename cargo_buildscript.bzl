@@ -330,6 +330,8 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
             sanitizer_flags,
         ),
     )
+    # Keep C/C++ compiler link phases routed through the LD shim so non-default
+    # linkers and linker flags stay consistent with env[LD] selection.
     compiler_linker = (
         cmd_args(env["LD"], parent = 1, format = "-B{}")
         if ctx.attrs._exec_os_type[OsLookup].script == ScriptLanguage("sh")

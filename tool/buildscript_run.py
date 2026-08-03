@@ -13,6 +13,7 @@ Run a crate's Cargo buildscript.
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import json
@@ -73,8 +74,14 @@ def cfg_env(rustc_cfg: Path) -> Dict[str, str]:
 
 
 def create_cwd(path: Path, manifest_dir: Path) -> Path:
-    """Create a directory with most of the same contents as manifest_dir, but
+    """Create a directory with a copy of most of manifest_dir, but
     excluding Rustup's rust-toolchain.toml configuration file.
+
+    Build-script outputs can be collected through a remote or FUSE-backed
+    filesystem.  A tree of relative symlinks is not reliable there: the
+    symlink entry can be observed before its target is materialized, causing
+    output collection to fail.  Use real copies so the declared cwd output is
+    self-contained and stable.
 
     Keeping rust-toolchain.toml goes wrong in the situation that all of the
     following happen:
@@ -121,9 +128,16 @@ def create_cwd(path: Path, manifest_dir: Path) -> Path:
 
     for dir_entry in manifest_dir.iterdir():
         if dir_entry.name not in ["rust-toolchain", "rust-toolchain.toml"]:
-            link = path.joinpath(dir_entry.name)
-            link.unlink(missing_ok=True)
-            link.symlink_to(os.path.relpath(dir_entry, path))
+            destination = path.joinpath(dir_entry.name)
+            if destination.is_dir() and not destination.is_symlink():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink(missing_ok=True)
+
+            if dir_entry.is_dir():
+                shutil.copytree(dir_entry, destination, symlinks=False)
+            else:
+                shutil.copy2(dir_entry, destination, follow_symlinks=True)
 
     return path
 
