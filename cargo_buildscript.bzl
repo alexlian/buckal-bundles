@@ -231,7 +231,10 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
     cxx_toolchain_info = ctx.attrs._cxx_toolchain[CxxToolchainInfo]
     rust_toolchain_info = ctx.attrs._rust_toolchain[RustToolchainInfo]
 
-    cwd = ctx.actions.declare_output("cwd", dir = True, has_content_based_path = True)
+    # The build script mutates this working directory. Keep it on the
+    # configured-target path so concurrent configurations do not share the
+    # content-based output staging directory while Buck snapshots it.
+    cwd = ctx.actions.declare_output("cwd", dir = True)
     out_dir = ctx.actions.declare_output("OUT_DIR", dir = True)
     rustc_flags = ctx.actions.declare_output("rustc_flags", has_content_based_path = True)
     # *BUCKAL-ONLY* metadata environment variables for *dependent* buildscript runners to consume
