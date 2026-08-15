@@ -11,6 +11,72 @@ from typing import IO, NamedTuple
 # This is the current buck2 project root
 TOOL_CWD: str = os.path.join(os.getcwd(), "")
 
+# Levels accepted in a `[lints]` table, spelled exactly as rustc's flag.
+# `force-warn` is hyphenated in both cargo's TOML and rustc's flag, so the
+# level string is the flag name for all five.
+LINT_LEVELS = frozenset({"allow", "warn", "force-warn", "deny", "forbid"})
+
+
+def lint_flags(cargo_toml: dict, load_workspace_toml) -> list[str]:
+    """Translate the package's effective `[lints]` table into rustc flags.
+
+    Cargo turns each `<lint> = <level>` entry into a `--<level>=<lint>` flag,
+    namespacing every table other than `rust` (`clippy::`, `rustdoc::`), and
+    orders the flags by each entry's `priority` so that a group-level deny
+    (`correctness = { level = "deny", priority = -1 }`) is emitted before the
+    specific entries meant to override it. Ties break on the lint name in
+    *descending* order, which is cargo's way of putting the `all` group last.
+
+    `cargo buckal migrate` never reads this table, so without this the
+    response file carries only `--env-set=CARGO_*` and a declared `deny` never
+    denies on the buck2 lane.
+    """
+    lints = cargo_toml.get("lints")
+    if not isinstance(lints, dict):
+        return []
+
+    if lints.get("workspace") is True:
+        workspace_toml = load_workspace_toml()
+        if workspace_toml is None:
+            # No --workspace was passed. `cargo_manifest` omits it for every
+            # vendored third-party target, so a crate that opts into workspace
+            # lints from outside a workspace we can see is left alone rather
+            # than failing its build.
+            return []
+        tables = workspace_toml.get("workspace", {}).get("lints") or {}
+    else:
+        tables = lints
+
+    entries = []
+    # Sorted tool-then-lint iteration reproduces cargo's BTreeMap order, which
+    # is what breaks a tie the sort key below leaves equal.
+    for tool in sorted(t for t in tables if isinstance(tables[t], dict)):
+        prefix = "" if tool == "rust" else f"{tool}::"
+        for name in sorted(tables[tool]):
+            spec = tables[tool][name]
+            if isinstance(spec, dict):
+                level = spec.get("level")
+                priority = spec.get("priority", 0)
+            else:
+                level = spec
+                priority = 0
+            if level not in LINT_LEVELS:
+                raise ValueError(
+                    f"Lint '{tool}.{name}' has unknown level {level!r}; "
+                    f"expected one of {sorted(LINT_LEVELS)}"
+                )
+            if not isinstance(priority, int) or isinstance(priority, bool):
+                raise ValueError(
+                    f"Lint '{tool}.{name}' has non-integer priority {priority!r}"
+                )
+            entries.append((priority, name, f"--{level}={prefix}{name}"))
+
+    # Two stable passes give cargo's `(priority, Reverse(name))` sort key while
+    # leaving the tool order above as the final tiebreak.
+    entries.sort(key=lambda e: e[1], reverse=True)
+    entries.sort(key=lambda e: e[0])
+    return [flag for _, _, flag in entries]
+
 
 class Args(NamedTuple):
     vendor: Path
@@ -45,16 +111,27 @@ def main() -> None:
         raise ValueError("Cargo.toml missing [package] section")
     
     workspace_package = {}
+    workspace_cargo_toml = None
+    workspace_toml_loaded = False
+
+    def load_workspace_toml():
+        """Parse the workspace manifest once; None when no --workspace was given."""
+        nonlocal workspace_cargo_toml, workspace_toml_loaded
+        if not workspace_toml_loaded:
+            workspace_toml_loaded = True
+            if args.workspace:
+                with args.workspace.open("rb") as f:
+                    workspace_cargo_toml = load(f)
+        return workspace_cargo_toml
 
     def load_workspace_package() -> dict:
         nonlocal workspace_package
         if workspace_package:
             return workspace_package
-        if not args.workspace:
+        root_toml = load_workspace_toml()
+        if root_toml is None:
             raise ValueError("Workspace reference specified but no workspace manifest path provided")
-        with args.workspace.open("rb") as f:
-            workspace_cargo_toml = load(f)
-        workspace_package = workspace_cargo_toml.get("workspace", {}).get("package")
+        workspace_package = root_toml.get("workspace", {}).get("package")
         if not workspace_package:
             raise ValueError("Workspace Cargo.toml missing [workspace.package] section")
         return workspace_package
@@ -149,6 +226,8 @@ def main() -> None:
             env_flags += f"--env-set={key}=\"{to_ascii_escaped(value)}\"\n"
         else:
             env_flags += f"--env-set={key}={to_ascii_escaped(value)}\n"
+    for flag in lint_flags(cargo_toml, load_workspace_toml):
+        env_flags += f"{flag}\n"
     args.out_flags.write(env_flags)
 
     if cargo_package.get("links"):
