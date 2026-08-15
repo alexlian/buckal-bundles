@@ -33,11 +33,7 @@ load("@prelude//os_lookup:defs.bzl", "Os", "OsLookup")
 load("@prelude//rust:rust_toolchain.bzl", "RustToolchainInfo")
 load("@prelude//rust:targets.bzl", "targets")
 load("@prelude//rust/tools:attrs.bzl", "RustInternalToolsInfo")
-load(
-    "@prelude//rust/tools:buildscript_platform.bzl",
-    "buildscript_platform_constraints",
-    "transition_alias",
-)
+load("@prelude//rust/buildscript:buildscript_platform.bzl", "transition_alias")
 load("@prelude//utils:cmd_script.bzl", "cmd_script")
 load("@prelude//utils:selects.bzl", "selects")
 load("@prelude//rust:build.bzl", "dependency_args")
@@ -373,17 +369,11 @@ def buildscript_run(
         else:
             return "{}-{}".format(name, plat)
 
-    if not rule_exists("buildscript_for_platform="):
-        buildscript_platform_constraints(
-            name = "buildscript_for_platform=",
-            reindeer_platforms = get_reindeer_platform_names(),
-        )
-
-    for plat in get_reindeer_platform_names():
+    for i, plat in enumerate(get_reindeer_platform_names()):
         transition_alias(
             name = platform_buildscript_build_name(plat),
             actual = buildscript_rule,
-            incoming_transition = ":buildscript_for_platform=[{}]".format(plat),
+            incoming_transition = "prelude//rust/buildscript:buildscript_platform_transition[{}]".format(i),
             target_compatible_with = buildscript_compatible_with,
             visibility = [],
         )
