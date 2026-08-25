@@ -101,7 +101,7 @@ def _make_rustc_shim(ctx: AnalysisContext, cwd: Artifact) -> cmd_args:
         language = ctx.attrs._exec_os_type[OsLookup].script,
     )
 
-    return cmd_args(shim, relative_to = cwd)
+    return _native_script_path(ctx, cmd_args(shim, relative_to = cwd))
 
 def _make_cc_shim(ctx: AnalysisContext, name: str, cmd: cmd_args) -> cmd_args:
     """
@@ -487,3 +487,18 @@ def buildscript_run(
         manifest_dir = manifest_dir,
         **kwargs
     )
+
+# Build scripts run `$RUSTC` through a shell on Windows, and a `.bat` reached
+# via a `/`-separated path is rejected by cmd.exe. With the prelude emitting
+# `/` separators on every exec platform (use_windows_path_separators = False),
+# the rustc shim handed to build scripts must be re-spelled natively. The shim
+# is exec-platform-local, so this leaks nothing into a digest another host
+# could share.
+#
+# The CC/CXX/LD/AR shims do not need this: they are handed over project-root
+# relative, and `normalize_project_relative_tool_paths` in `buildscript_run.py`
+# runs them through `os.path.abspath`, which already spells them natively.
+def _native_script_path(ctx: AnalysisContext, path: cmd_args) -> cmd_args:
+    if ctx.attrs._exec_os_type[OsLookup].os == Os("windows"):
+        return cmd_args(path, replace_regex = ("/", "\\\\"))
+    return path
