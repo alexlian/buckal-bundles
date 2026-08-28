@@ -380,15 +380,36 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
         category = "buildscript",
     )
 
+    # `out_dir` and `cwd` are both listed as `other_outputs` of the
+    # `rustc_flags` sub-target, and that is load-bearing rather than tidy. A
+    # build script that emits `cargo:rustc-link-search=native=<dir>/lib` makes
+    # the runner write a `-Lnative=<dir>/lib` line into `rustc_flags`, which
+    # `rustc_action.py` reads at action time. That is a plain string: buck2
+    # sees no dependency edge from the consuming `rust_library` to the
+    # directory it names, so a consumer build materializes `rustc_flags` and
+    # leaves that directory on the floor whenever the buildscript action is
+    # served from cache rather than executed here. The `-L` then names a
+    # directory that does not exist and every link fails with the import
+    # library missing (`LNK1181` on MSVC) while `check` stays green, because
+    # `check` does not link. `other_outputs` is what re-attaches the edge:
+    # `$(location :...[rustc_flags])` carries them as hidden inputs, so
+    # anything that reads the flags file also forces the directories those
+    # flags point into.
+    #
+    # Both directories have to be listed. A link search path can land under
+    # `OUT_DIR` (the usual `cc`/`cmake` crate shape) or under the build
+    # script's `cwd` (every `windows_*_msvc` crate does this), and the two are
+    # separate declared outputs.
     return [DefaultInfo(
         default_output = None,
         sub_targets = {
+            "cwd": [DefaultInfo(default_output = cwd)],
             "out_dir": [DefaultInfo(default_output = out_dir)],
             "rustc_flags": [DefaultInfo(
                 default_output = rustc_flags,
                 # Keep the generated native artifacts as hidden inputs when this
                 # response file is consumed through $(location ...[rustc_flags]).
-                other_outputs = [out_dir],
+                other_outputs = [out_dir, cwd],
             )],
             "metadata": [DefaultInfo(default_output = metadata)],
         },
