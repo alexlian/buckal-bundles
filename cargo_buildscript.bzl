@@ -290,11 +290,26 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
         category = "buildscript",
     )
 
+    # `cwd` is listed as an `other_output` of the `rustc_flags` sub-target, and
+    # that is load-bearing rather than tidy. A build script that emits
+    # `cargo:rustc-link-search=native=<cwd>/lib` (every `windows_*_msvc` crate
+    # does) makes the runner write `-Lnative=$(abspath .../cwd/lib)` into
+    # `rustc_flags`, which `rustc_action.py` expands at action time. That is a
+    # plain string: buck2 sees no dependency edge from the consuming
+    # `rust_library` to `cwd`, so a consumer build materializes `rustc_flags`
+    # and leaves `cwd` on the floor whenever the buildscript action is served
+    # from cache rather than executed here. The `-L` then names a directory
+    # that does not exist and every link fails with the import library missing
+    # (`LNK1181` on MSVC) while `check` stays green, because `check` does not
+    # link. `other_outputs` is what re-attaches the edge: `$(location
+    # :...[rustc_flags])` carries them as hidden inputs, so anything that reads
+    # the flags file also forces the directory those flags point into.
     return [DefaultInfo(
         default_output = None,
         sub_targets = {
+            "cwd": [DefaultInfo(default_output = cwd)],
             "out_dir": [DefaultInfo(default_output = out_dir)],
-            "rustc_flags": [DefaultInfo(default_output = rustc_flags)],
+            "rustc_flags": [DefaultInfo(default_output = rustc_flags, other_outputs = [cwd])],
             "metadata": [DefaultInfo(default_output = metadata)],
         },
     )]
