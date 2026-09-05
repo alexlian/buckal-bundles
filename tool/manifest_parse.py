@@ -11,6 +11,28 @@ from typing import IO, NamedTuple
 # This is the current buck2 project root
 TOOL_CWD: str = os.path.join(os.getcwd(), "")
 
+# Env vars whose value is a filesystem path. These are emitted project-relative
+# and restored to absolute by whichever side consumes them, so that no cached
+# artifact carries the producing checkout's root.
+PATH_ENV_KEYS = frozenset({
+    "CARGO_MANIFEST_DIR",
+    "CARGO_MANIFEST_PATH",
+    "CARGO_PKG_README",
+    "CARGO_PKG_LICENSE_FILE",
+})
+
+
+def _project_relative(path) -> str:
+    """Normalize a path that is already relative to the buck2 project root.
+
+    Buck2 addresses action inputs and outputs relative to the project root and
+    runs the action with that root as its cwd, so `args.vendor` and friends
+    arrive relative already; this only collapses any `..` segments an inherited
+    `readme` / `license-file` value introduces. It deliberately does NOT call
+    `resolve()` or `abspath()`, which would reintroduce the root.
+    """
+    return os.path.normpath(str(path))
+
 # Levels accepted in a `[lints]` table, spelled exactly as rustc's flag.
 # `force-warn` is hyphenated in both cargo's TOML and rustc's flag, so the
 # level string is the flag name for all five.
@@ -103,8 +125,13 @@ def main() -> None:
     with (args.vendor / "Cargo.toml").open("rb") as f:
         cargo_toml = load(f)
 
-    cargo_env["CARGO_MANIFEST_DIR"] = str(TOOL_CWD / args.vendor)
-    cargo_env["CARGO_MANIFEST_PATH"] = str(TOOL_CWD / args.vendor / "Cargo.toml")
+    # Project-relative, never prefixed with this producer's `getcwd()`: the
+    # action's digest does not include the project root, so an absolute path
+    # baked in here makes two checkouts on one host mint one digest for
+    # different correct outputs. The consuming side restores the absolute form
+    # — `$(abspath ...)` in ENV_FLAGS, `buildscript_run.py` for ENV_DICT.
+    cargo_env["CARGO_MANIFEST_DIR"] = _project_relative(args.vendor)
+    cargo_env["CARGO_MANIFEST_PATH"] = _project_relative(args.vendor / "Cargo.toml")
 
     cargo_package = cargo_toml.get("package")
     if not cargo_package:
@@ -194,8 +221,11 @@ def main() -> None:
 
     license_file = cargo_package.get("license-file", "")
 
-    # Emit absolute paths for readme and license-file so build scripts can
-    # locate the files regardless of their (synthetic) working directory.
+    # Emit these project-relative. Build scripts do need them absolute — their
+    # working directory is synthetic — but absolutizing *here* would bake this
+    # producer's checkout root into a cached artifact whose digest omits it.
+    # `buildscript_run.py` absolutizes both keys after loading the dict, and
+    # ENV_FLAGS wraps them in `$(abspath ...)` for the rustc side.
     # For workspace-inherited values the path is relative to the workspace root;
     # for member-local values it is relative to the vendor directory.
     # NOTE: args.workspace must point to the real workspace Cargo.toml (not a
@@ -203,14 +233,14 @@ def main() -> None:
     # cargo-buckal export_file rule uses mode = "reference".
     if readme:
         if "readme" in inherited_from_workspace and args.workspace:
-            readme = str((args.workspace.parent / readme).resolve())
+            readme = _project_relative(args.workspace.parent / readme)
         else:
-            readme = str((TOOL_CWD / args.vendor / readme).resolve())
+            readme = _project_relative(args.vendor / readme)
     if license_file:
         if "license-file" in inherited_from_workspace and args.workspace:
-            license_file = str((args.workspace.parent / license_file).resolve())
+            license_file = _project_relative(args.workspace.parent / license_file)
         else:
-            license_file = str((TOOL_CWD / args.vendor / license_file).resolve())
+            license_file = _project_relative(args.vendor / license_file)
 
     cargo_env["CARGO_PKG_README"] = str(readme)
     cargo_env["CARGO_PKG_LICENSE_FILE"] = str(license_file)
@@ -224,6 +254,12 @@ def main() -> None:
             # Escape newlines and quotes in description
             value = value.replace("\n", "\\n").replace('"', '\\"')
             env_flags += f"--env-set={key}=\"{to_ascii_escaped(value)}\"\n"
+        elif key in PATH_ENV_KEYS and value:
+            # `rustc_action.py` expands `$(abspath ...)` against its own cwd —
+            # the project root of whichever checkout consumes this artifact —
+            # so rustc still sees the absolute path Cargo guarantees, while the
+            # cached bytes stay root-independent.
+            env_flags += f"--env-set={key}=$(abspath {to_ascii_escaped(value)})\n"
         else:
             env_flags += f"--env-set={key}={to_ascii_escaped(value)}\n"
     for flag in lint_flags(cargo_toml, load_workspace_toml):

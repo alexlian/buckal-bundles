@@ -12,6 +12,8 @@ follow it, and workspace inheritance, which is how every member opts in.
 Run directly: `python3 tool/manifest_parse_test.py`
 """
 
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -220,6 +222,101 @@ class TestResponseFileGeneration(unittest.TestCase):
                 ["--deny=clippy::correctness",
                  "--deny=unsafe_code",
                  "--warn=clippy::collapsible_if"],
+            )
+
+
+class TestCheckoutRootIndependence(unittest.TestCase):
+    """The emitted artifacts must not name the checkout that produced them.
+
+    The action's digest does not include the buck2 project root, so two
+    checkouts on one host mint the same digest for these outputs. That is only
+    correct if the outputs are genuinely identical -- when they carried an
+    absolute `CARGO_MANIFEST_DIR`, whichever checkout populated a shared cache
+    first served its own tree's paths to the other, silently, for every crate
+    reading `env!("CARGO_MANIFEST_DIR")`. Measured at 218 of 967 artifacts on a
+    four-checkout box before this fix.
+    """
+
+    VENDOR_REL = Path("buck-out") / "vendor"
+
+    MANIFEST = textwrap.dedent(
+        """
+        [package]
+        name = "demo"
+        version = "1.2.3"
+        readme = "README.md"
+        license-file = "LICENSE.txt"
+        """
+    ).strip()
+
+    def _emit(self, root: Path):
+        """Run the tool with `root` as cwd; return (flags_text, dict_text)."""
+        vendor = root / self.VENDOR_REL
+        vendor.mkdir(parents=True)
+        (vendor / "Cargo.toml").write_text(self.MANIFEST, encoding="utf-8")
+        (vendor / "README.md").write_text("readme", encoding="utf-8")
+        (vendor / "LICENSE.txt").write_text("license", encoding="utf-8")
+
+        out_flags = root / "ENV_FLAGS"
+        out_dict = root / "ENV_DICT"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "manifest_parse.py"),
+                f"--vendor={self.VENDOR_REL}",
+                f"--out-dict={out_dict}",
+                f"--out-flags={out_flags}",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return (
+            out_flags.read_text(encoding="utf-8"),
+            out_dict.read_text(encoding="utf-8"),
+        )
+
+    def test_two_checkouts_emit_identical_bytes(self):
+        # The property the cache key actually rests on.
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            flags_a, dict_a = self._emit(Path(a))
+            flags_b, dict_b = self._emit(Path(b))
+        self.assertEqual(flags_a, flags_b)
+        self.assertEqual(dict_a, dict_b)
+
+    def test_no_absolute_path_is_emitted(self):
+        with tempfile.TemporaryDirectory() as root:
+            flags_text, dict_text = self._emit(Path(root))
+        # The temp root is what a real checkout root stands in for here.
+        for blob, name in ((flags_text, "ENV_FLAGS"), (dict_text, "ENV_DICT")):
+            self.assertNotIn(str(Path(root)), blob, f"{name} names the producing root")
+
+    def test_path_vars_are_wrapped_for_the_consuming_action(self):
+        # rustc still needs an absolute path; `rustc_action.py` expands
+        # `$(abspath ...)` against the *consuming* checkout's root.
+        with tempfile.TemporaryDirectory() as root:
+            flags_text, _ = self._emit(Path(root))
+        for key in ("CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH",
+                    "CARGO_PKG_README", "CARGO_PKG_LICENSE_FILE"):
+            self.assertIn(f"--env-set={key}=$(abspath ", flags_text)
+
+    def test_non_path_vars_are_left_unwrapped(self):
+        with tempfile.TemporaryDirectory() as root:
+            flags_text, _ = self._emit(Path(root))
+        self.assertIn("--env-set=CARGO_PKG_VERSION=1.2.3\n", flags_text)
+        self.assertNotIn("CARGO_PKG_VERSION=$(abspath", flags_text)
+
+    def test_dict_carries_the_bare_relative_path(self):
+        # buildscript_run.py absolutizes these; `$(abspath ...)` is a
+        # rustc_action mechanism and would arrive there as a literal string.
+        with tempfile.TemporaryDirectory() as root:
+            _, dict_text = self._emit(Path(root))
+        parsed = json.loads(dict_text)
+        self.assertNotIn("$(abspath", dict_text)
+        for key in ("CARGO_MANIFEST_DIR", "CARGO_PKG_README"):
+            self.assertFalse(
+                os.path.isabs(parsed[key]), f"{key} is absolute in ENV_DICT"
             )
 
 
