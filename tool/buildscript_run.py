@@ -24,6 +24,15 @@ from typing import Any, Dict, IO, NamedTuple, Optional
 IS_WINDOWS: bool = os.name == "nt"
 TOOL_CWD: str = os.path.join(os.getcwd(), "")
 
+# *BUCKAL-ONLY* Path-valued vars that `manifest_parse.py` emits project-relative
+# so the cached ENV_DICT carries no producing-checkout root. CARGO_MANIFEST_DIR
+# and CARGO_MANIFEST_PATH are not listed: they are overwritten outright below
+# from `--create-cwd`, which is the materialized dir this run actually uses.
+RELATIVE_PATH_ENV_KEYS = (
+    "CARGO_PKG_README",
+    "CARGO_PKG_LICENSE_FILE",
+)
+
 
 def eprint(*args: Any, **kwargs: Any) -> None:
     print(*args, end="\n", file=sys.stderr, flush=True, **kwargs)
@@ -262,6 +271,17 @@ def main() -> None:  # noqa: C901
         with extra_env_src.open(encoding="utf-8") as f:
             extra_env = json.load(f)
             env.update(extra_env)
+
+    # *BUCKAL-ONLY* Restore the absolute form of the path vars the manifest
+    # emitted project-relative. The build script runs with a synthetic cwd, so
+    # a relative value would not resolve for it; this tool, by contrast, starts
+    # at the buck2 project root, which is what these paths are relative to.
+    # An already-absolute value is left alone, so an ENV_DICT produced by an
+    # older buckal still works.
+    for key in RELATIVE_PATH_ENV_KEYS:
+        value = env.get(key)
+        if value and not os.path.isabs(value):
+            env[key] = os.path.abspath(os.path.join(TOOL_CWD, value))
 
     out_dir = os.getenv("OUT_DIR")
     assert out_dir is not None, "OUT_DIR env is missing"
