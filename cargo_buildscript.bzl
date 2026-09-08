@@ -334,7 +334,7 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
     # "windows_ml64", "nasm".
     if cxx_toolchain_info.c_compiler_info.compiler_type not in ("windows", "windows_ml64"):
         sanitizer_flags = ["-fno-sanitize=all"]
-        env["LD"] = _make_cc_shim(
+        ld_shim = _make_cc_shim(
             ctx = ctx,
             name = "__ld_shim",
             cmd = cmd_args(
@@ -346,12 +346,19 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
         )
         # Keep C/C++ compiler link phases routed through the LD shim so non-default
         # linkers and linker flags stay consistent with env[LD] selection.
+        #
+        # *BUCKAL-ONLY* This is derived from the unwrapped `ld_shim` on purpose:
+        # `parent = 1` needs to operate on the artifact path, not on a string
+        # `_native_script_path` has already rewritten. It does not need the
+        # rewrite either -- the compiler driver consumes it, and drivers accept
+        # `/` on Windows. Only the values handed to build scripts do.
         compiler_linker = (
-            cmd_args(env["LD"], parent = 1, format = "-B{}")
+            cmd_args(ld_shim, parent = 1, format = "-B{}")
             if ctx.attrs._exec_os_type[OsLookup].script == ScriptLanguage("sh")
-            else cmd_args(env["LD"], format = "--ld-path={}")
+            else cmd_args(ld_shim, format = "--ld-path={}")
         )
-        env["CC"] = _make_cc_shim(
+        env["LD"] = _native_script_path(ctx, ld_shim)
+        env["CC"] = _native_script_path(ctx, _make_cc_shim(
             ctx = ctx,
             name = "__cc_shim",
             cmd = cmd_args(
@@ -365,8 +372,8 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
                 ctx.attrs.cxx_flags,
                 ["--target={}".format(target_triple)] if target_triple else [],
             ),
-        )
-        env["CXX"] = _make_cc_shim(
+        ))
+        env["CXX"] = _native_script_path(ctx, _make_cc_shim(
             ctx = ctx,
             name = "__cxx_shim",
             cmd = cmd_args(
@@ -380,12 +387,12 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
                 ctx.attrs.cxx_flags,
                 ["--target={}".format(target_triple)] if target_triple else [],
             ),
-        )
-        env["AR"] = _make_cc_shim(
+        ))
+        env["AR"] = _native_script_path(ctx, _make_cc_shim(
             ctx = ctx,
             name = "__ar_shim",
             cmd = cmd_args(cxx_toolchain_info.linker_info.archiver),
-        )
+        ))
 
     # Environment variables specified in the target's attributes get priority
     # over all the above.
@@ -534,9 +541,13 @@ def buildscript_run(
 # is exec-platform-local, so this leaks nothing into a digest another host
 # could share.
 #
-# The CC/CXX/LD/AR shims do not need this: they are handed over project-root
-# relative, and `normalize_project_relative_tool_paths` in `buildscript_run.py`
-# runs them through `os.path.abspath`, which already spells them natively.
+# The CC/CXX/LD/AR shims need it too. `normalize_project_relative_tool_paths`
+# in `buildscript_run.py` does spell most of them natively as a side effect of
+# `os.path.abspath`, but it bails out early on an already-absolute value and on
+# one whose file it cannot stat, and either case leaves `/` in a path that a
+# build script then hands to cmd.exe. Since the prelude renders every path
+# forward-slashed (`path_sep = "/"` in `rust/context.bzl`, unconditional as of
+# the 2026-09-01 pin), that is reachable rather than theoretical.
 def _native_script_path(ctx: AnalysisContext, path: cmd_args) -> cmd_args:
     if ctx.attrs._exec_os_type[OsLookup].os == Os("windows"):
         return cmd_args(path, replace_regex = ("/", "\\\\"))
