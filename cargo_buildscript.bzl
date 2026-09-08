@@ -300,7 +300,14 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
                 env["OPT_LEVEL"] = opt_level
 
     # C and C++ compilers for bindgen.
+    #
+    # *BUCKAL-ONLY* `get_target_triple` only answers for Apple SDK targets. Fall
+    # back to the Rust toolchain's triple so that non-Apple cross-compilation
+    # also gets a `--target=` on the C/C++ shims.
     target_triple = get_target_triple(ctx)
+    if target_triple == None and rust_toolchain_info.rustc_target_triple:
+        target_triple = rust_toolchain_info.rustc_target_triple
+
     preprocessor = cxx_merge_cpreprocessors(
         ctx.actions,
         [],
@@ -315,59 +322,70 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
         ],
     )
     deps_link = deps_tset.project_as_args("default")
-    sanitizer_flags = ["-fno-sanitize=all"]
-    env["LD"] = _make_cc_shim(
-        ctx = ctx,
-        name = "__ld_shim",
-        cmd = cmd_args(
-            cxx_toolchain_info.linker_info.linker,
-            cxx_toolchain_info.linker_info.linker_flags or [],
-            rust_toolchain_info.linker_flags,
-            sanitizer_flags,
-        ),
-    )
-    # Keep C/C++ compiler link phases routed through the LD shim so non-default
-    # linkers and linker flags stay consistent with env[LD] selection.
-    compiler_linker = (
-        cmd_args(env["LD"], parent = 1, format = "-B{}")
-        if ctx.attrs._exec_os_type[OsLookup].script == ScriptLanguage("sh")
-        else cmd_args(env["LD"], format = "--ld-path={}")
-    )
-    env["CC"] = _make_cc_shim(
-        ctx = ctx,
-        name = "__cc_shim",
-        cmd = cmd_args(
-            cxx_toolchain_info.c_compiler_info.compiler,
-            compiler_linker,
-            cxx_toolchain_info.c_compiler_info.preprocessor_flags,
-            cxx_toolchain_info.c_compiler_info.compiler_flags,
-            deps_preprocessor_flags,
-            deps_link,
-            sanitizer_flags,
-            ctx.attrs.cxx_flags,
-            ["--target={}".format(target_triple)] if target_triple else [],
-        ),
-    )
-    env["CXX"] = _make_cc_shim(
-        ctx = ctx,
-        name = "__cxx_shim",
-        cmd = cmd_args(
-            cxx_toolchain_info.cxx_compiler_info.compiler,
-            compiler_linker,
-            cxx_toolchain_info.cxx_compiler_info.preprocessor_flags,
-            cxx_toolchain_info.cxx_compiler_info.compiler_flags,
-            deps_preprocessor_flags,
-            deps_link,
-            sanitizer_flags,
-            ctx.attrs.cxx_flags,
-            ["--target={}".format(target_triple)] if target_triple else [],
-        ),
-    )
-    env["AR"] = _make_cc_shim(
-        ctx = ctx,
-        name = "__ar_shim",
-        cmd = cmd_args(cxx_toolchain_info.linker_info.archiver),
-    )
+    # *BUCKAL-ONLY* On an MSVC target, leave CC/CXX/LD/AR unset and let the `cc`
+    # crate find cl.exe on PATH itself. The `cc` crate decides whether it is
+    # driving MSVC or gcc by looking at the *file name* of $CC, so handing it a
+    # `__cc_shim.bat` makes it guess gcc and emit gcc-only flags
+    # (`-ffunction-sections`, `-O0`, ...) that cl.exe rejects outright. The
+    # shims' cross-compilation flags are gcc/clang spellings anyway, so there is
+    # nothing for them to contribute here.
+    #
+    # compiler_type is one of: "clang", "gcc", "windows" (cl.exe), "clang_cl",
+    # "windows_ml64", "nasm".
+    if cxx_toolchain_info.c_compiler_info.compiler_type not in ("windows", "windows_ml64"):
+        sanitizer_flags = ["-fno-sanitize=all"]
+        env["LD"] = _make_cc_shim(
+            ctx = ctx,
+            name = "__ld_shim",
+            cmd = cmd_args(
+                cxx_toolchain_info.linker_info.linker,
+                cxx_toolchain_info.linker_info.linker_flags or [],
+                rust_toolchain_info.linker_flags,
+                sanitizer_flags,
+            ),
+        )
+        # Keep C/C++ compiler link phases routed through the LD shim so non-default
+        # linkers and linker flags stay consistent with env[LD] selection.
+        compiler_linker = (
+            cmd_args(env["LD"], parent = 1, format = "-B{}")
+            if ctx.attrs._exec_os_type[OsLookup].script == ScriptLanguage("sh")
+            else cmd_args(env["LD"], format = "--ld-path={}")
+        )
+        env["CC"] = _make_cc_shim(
+            ctx = ctx,
+            name = "__cc_shim",
+            cmd = cmd_args(
+                cxx_toolchain_info.c_compiler_info.compiler,
+                compiler_linker,
+                cxx_toolchain_info.c_compiler_info.preprocessor_flags,
+                cxx_toolchain_info.c_compiler_info.compiler_flags,
+                deps_preprocessor_flags,
+                deps_link,
+                sanitizer_flags,
+                ctx.attrs.cxx_flags,
+                ["--target={}".format(target_triple)] if target_triple else [],
+            ),
+        )
+        env["CXX"] = _make_cc_shim(
+            ctx = ctx,
+            name = "__cxx_shim",
+            cmd = cmd_args(
+                cxx_toolchain_info.cxx_compiler_info.compiler,
+                compiler_linker,
+                cxx_toolchain_info.cxx_compiler_info.preprocessor_flags,
+                cxx_toolchain_info.cxx_compiler_info.compiler_flags,
+                deps_preprocessor_flags,
+                deps_link,
+                sanitizer_flags,
+                ctx.attrs.cxx_flags,
+                ["--target={}".format(target_triple)] if target_triple else [],
+            ),
+        )
+        env["AR"] = _make_cc_shim(
+            ctx = ctx,
+            name = "__ar_shim",
+            cmd = cmd_args(cxx_toolchain_info.linker_info.archiver),
+        )
 
     # Environment variables specified in the target's attributes get priority
     # over all the above.
