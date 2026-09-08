@@ -218,6 +218,16 @@ def run_buildscript(
         print(f"Failed to run {buildscript} because {ex}", file=sys.stderr)
         sys.exit(1)
     except subprocess.CalledProcessError as ex:
+        # *BUCKAL-ONLY* Surface the captured stdout. `check_output` captures
+        # stdout and leaves stderr inherited, so a build script that fails
+        # after writing its diagnosis to stdout -- which is where a build
+        # script is *supposed* to talk, and where `cc-rs` re-emits compiler
+        # output as `cargo:warning=` lines -- would otherwise exit with a bare
+        # code and nothing printed anywhere. That reads as "failed silently"
+        # and sends the reader hunting in the wrong place entirely.
+        eprint(f"Build script {buildscript} failed with exit code {ex.returncode}")
+        if ex.stdout:
+            eprint("Stdout:\n" + ex.stdout)
         sys.exit(ex.returncode)
 
 
