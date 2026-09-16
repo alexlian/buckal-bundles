@@ -30,8 +30,12 @@ def _project_relative(path) -> str:
     arrive relative already; this only collapses any `..` segments an inherited
     `readme` / `license-file` value introduces. It deliberately does NOT call
     `resolve()` or `abspath()`, which would reintroduce the root.
+
+    The result is spelled with "/" on every OS so the emitted bytes do not
+    depend on the producing OS; consumers absolutize it, which restores the
+    native separator.
     """
-    return os.path.normpath(str(path))
+    return os.path.normpath(str(path)).replace(os.path.sep, "/")
 
 # Levels accepted in a `[lints]` table, spelled exactly as rustc's flag.
 # `force-warn` is hyphenated in both cargo's TOML and rustc's flag, so the

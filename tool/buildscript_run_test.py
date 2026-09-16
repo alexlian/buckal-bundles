@@ -57,6 +57,24 @@ class TestEncodeDecode(unittest.TestCase):
                     paths.join(consumer, suffix),
                 )
 
+    def test_stored_bytes_do_not_depend_on_the_producing_os(self):
+        stored = []
+        for paths, root in ((ntpath, "D:\\producer"), (posixpath, "/producer")):
+            with patch.object(runner.os, "path", paths):
+                value = paths.join(root, "buck-out", "bzip2", "include")
+                stored.append(json.dumps(runner.encode_metadata_value(value, root)))
+        self.assertEqual(stored[0], stored[1])
+        self.assertEqual(json.loads(stored[0]), {TAG: "buck-out/bzip2/include"})
+
+    def test_windows_consumer_gets_a_native_path(self):
+        with patch.object(runner.os, "path", ntpath):
+            self.assertEqual(
+                runner.decode_metadata_value(
+                    {TAG: "buck-out/bzip2/include"}, "C:\\consumer\\"
+                ),
+                "C:\\consumer\\buck-out\\bzip2\\include",
+            )
+
     def test_root_with_trailing_separator(self):
         # TOOL_CWD is spelled with a trailing separator.
         with patch.object(runner.os, "path", posixpath):
@@ -161,8 +179,7 @@ class TestMain(unittest.TestCase):
                 "cargo::metadata=version=1.0.8\n",
             )
             self.assertEqual(
-                values["DEP_BZIP2_INCLUDE"],
-                {TAG: os.path.join("buck-out", "bzip2", "include")},
+                values["DEP_BZIP2_INCLUDE"], {TAG: "buck-out/bzip2/include"}
             )
             self.assertEqual(values["DEP_BZIP2_ROOT"], {TAG: "buck-out"})
             self.assertEqual(values["DEP_BZIP2_VERSION"], "1.0.8")
@@ -179,9 +196,8 @@ class TestMain(unittest.TestCase):
             incoming.write_text(
                 json.dumps(
                     {
-                        "DEP_BZIP2_INCLUDE": {
-                            TAG: os.path.join("buck-out", "bzip2", "include")
-                        },
+                        # "/" on every OS; the consumer gets a native path.
+                        "DEP_BZIP2_INCLUDE": {TAG: "buck-out/bzip2/include"},
                         "DEP_BZIP2_VERSION": "1.0.8",
                     }
                 ),

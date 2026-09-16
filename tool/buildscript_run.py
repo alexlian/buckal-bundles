@@ -59,8 +59,8 @@ def encode_metadata_value(value: str, root: str) -> Union[str, Dict[str, str]]:
     verbatim is replayed into any checkout that gets a cache hit, pointing its
     build scripts at the producer's tree. A value that is, as a whole, an
     absolute path inside the project root is stored project-relative under a
-    tag instead; the tag keeps it distinct from ordinary relative text such as
-    a version or a library name.
+    tag instead, spelled with "/" on every OS; the tag keeps it distinct from
+    ordinary relative text such as a version or a library name.
 
     Everything else is stored unchanged: relative strings, absolute paths
     outside the root, and path lists or paths embedded in larger text. Those
@@ -74,15 +74,18 @@ def encode_metadata_value(value: str, root: str) -> Union[str, Dict[str, str]]:
         or not _is_within(root, value)
     ):
         return value
-    return {PROJECT_RELATIVE_PATH_TAG: os.path.relpath(value, root)}
+    # Always "/", so the stored bytes do not depend on the producing OS.
+    relative = os.path.relpath(value, root).replace(os.path.sep, "/")
+    return {PROJECT_RELATIVE_PATH_TAG: relative}
 
 
 def decode_metadata_value(value: Any, root: str) -> str:
     """*BUCKAL-ONLY* Resolve a METADATA value against the consuming checkout.
 
     Plain strings pass through, which also keeps `ENV_DICT` files (all
-    strings) and METADATA written before the tag existed readable. A malformed
-    tag, or one that escapes the root, is refused rather than guessed at.
+    strings) and METADATA written before the tag existed readable. The result
+    is a native absolute path. A malformed tag, or one that escapes the root,
+    is refused rather than guessed at.
     """
     if isinstance(value, str):
         return value

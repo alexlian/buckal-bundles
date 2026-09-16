@@ -13,6 +13,7 @@ Run directly: `python3 tool/manifest_parse_test.py`
 """
 
 import json
+import ntpath
 import os
 import subprocess
 import sys
@@ -20,6 +21,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import manifest_parse as mp  # noqa: E402
@@ -317,6 +319,25 @@ class TestCheckoutRootIndependence(unittest.TestCase):
         for key in ("CARGO_MANIFEST_DIR", "CARGO_PKG_README"):
             self.assertFalse(
                 os.path.isabs(parsed[key]), f"{key} is absolute in ENV_DICT"
+            )
+
+    def test_paths_use_forward_slashes_on_every_os(self):
+        # Keeps the emitted bytes the same whichever OS produced them.
+        with tempfile.TemporaryDirectory() as root:
+            flags_text, dict_text = self._emit(Path(root))
+        parsed = json.loads(dict_text)
+        self.assertEqual(parsed["CARGO_MANIFEST_DIR"], "buck-out/vendor")
+        self.assertEqual(parsed["CARGO_MANIFEST_PATH"], "buck-out/vendor/Cargo.toml")
+        self.assertEqual(parsed["CARGO_PKG_README"], "buck-out/vendor/README.md")
+        self.assertIn(
+            "--env-set=CARGO_MANIFEST_DIR=$(abspath buck-out/vendor)\n", flags_text
+        )
+
+    def test_windows_spelling_is_normalized(self):
+        with patch.object(mp.os, "path", ntpath):
+            self.assertEqual(
+                mp._project_relative("buck-out\\vendor\\..\\vendor\\x"),
+                "buck-out/vendor/x",
             )
 
 
