@@ -256,8 +256,15 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
     ]
 
     # *BUCKAL-ONLY* read environment variable source files and set them for buildscript runner
+    # The files named by a dependency's metadata are hidden inputs; without
+    # them a cache hit leaves that dependency's include dir unmaterialized.
     for env_src in ctx.attrs.env_srcs:
-        cmd.append(cmd_args("--extra-env=", env_src[DefaultInfo].default_outputs[0], delimiter = ""))
+        cmd.append(cmd_args(
+            "--extra-env=",
+            env_src[DefaultInfo].default_outputs[0],
+            delimiter = "",
+            hidden = env_src[DefaultInfo].other_outputs,
+        ))
 
     # See https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts
 
@@ -439,7 +446,13 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
                 # response file is consumed through $(location ...[rustc_flags]).
                 other_outputs = [out_dir, cwd],
             )],
-            "metadata": [DefaultInfo(default_output = metadata)],
+            # Metadata values commonly name files under this run's `OUT_DIR`
+            # or `cwd` (a native dep's include dir), so carry both along for
+            # the dependent runner the same way `rustc_flags` does.
+            "metadata": [DefaultInfo(
+                default_output = metadata,
+                other_outputs = [out_dir, cwd],
+            )],
         },
     )]
 
