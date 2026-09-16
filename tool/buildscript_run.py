@@ -18,7 +18,7 @@ import subprocess
 import sys
 import json
 from pathlib import Path
-from typing import Any, Dict, IO, NamedTuple, Optional
+from typing import Any, Dict, IO, NamedTuple, Optional, Union
 
 
 IS_WINDOWS: bool = os.name == "nt"
@@ -32,6 +32,69 @@ RELATIVE_PATH_ENV_KEYS = (
     "CARGO_PKG_README",
     "CARGO_PKG_LICENSE_FILE",
 )
+
+# *BUCKAL-ONLY* Tag for a `links` metadata value that was an absolute path
+# inside the producing project root. See `encode_metadata_value`.
+PROJECT_RELATIVE_PATH_TAG = "buckal_project_relative_path"
+
+
+def _is_within(root: str, path: str) -> bool:
+    """Whether `path` is `root` or below it, compared by path component.
+
+    Lexical only: symlinks and junctions are not resolved, so a path that
+    reaches the project through a link is judged by how it is spelled.
+    """
+    root = os.path.normpath(root)
+    try:
+        common = os.path.commonpath([root, os.path.normpath(path)])
+    except ValueError:  # Different Windows drives, or absolute vs relative.
+        return False
+    return os.path.normcase(common) == os.path.normcase(root)
+
+
+def encode_metadata_value(value: str, root: str) -> Union[str, Dict[str, str]]:
+    """*BUCKAL-ONLY* Keep the producing checkout's root out of METADATA.
+
+    METADATA is a cached action output, so an absolute `DEP_*` path stored
+    verbatim is replayed into any checkout that gets a cache hit, pointing its
+    build scripts at the producer's tree. A value that is, as a whole, an
+    absolute path inside the project root is stored project-relative under a
+    tag instead; the tag keeps it distinct from ordinary relative text such as
+    a version or a library name.
+
+    Everything else is stored unchanged: relative strings, absolute paths
+    outside the root, and path lists or paths embedded in larger text. Those
+    last two still carry the producer's root if a build script emits them.
+    """
+    # A path list parses as one absolute path whose first entry is the only
+    # one rebased, so leave any value holding a list separator alone.
+    if (
+        not os.path.isabs(value)
+        or os.path.pathsep in value
+        or not _is_within(root, value)
+    ):
+        return value
+    return {PROJECT_RELATIVE_PATH_TAG: os.path.relpath(value, root)}
+
+
+def decode_metadata_value(value: Any, root: str) -> str:
+    """*BUCKAL-ONLY* Resolve a METADATA value against the consuming checkout.
+
+    Plain strings pass through, which also keeps `ENV_DICT` files (all
+    strings) and METADATA written before the tag existed readable. A malformed
+    tag, or one that escapes the root, is refused rather than guessed at.
+    """
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict) or set(value) != {PROJECT_RELATIVE_PATH_TAG}:
+        raise ValueError(f"unrecognized metadata value {value!r}")
+    relative = value[PROJECT_RELATIVE_PATH_TAG]
+    if not isinstance(relative, str) or os.path.isabs(relative):
+        raise ValueError(f"metadata path is not project-relative: {relative!r}")
+    resolved = os.path.normpath(os.path.join(root, relative))
+    if not _is_within(root, resolved):
+        raise ValueError(f"metadata path escapes the project root: {relative!r}")
+    return resolved
 
 
 def eprint(*args: Any, **kwargs: Any) -> None:
@@ -280,7 +343,12 @@ def main() -> None:  # noqa: C901
         extra_env_src = Path(extra_env_path)
         with extra_env_src.open(encoding="utf-8") as f:
             extra_env = json.load(f)
-            env.update(extra_env)
+        for key, value in extra_env.items():
+            try:
+                env[key] = decode_metadata_value(value, TOOL_CWD)
+            except ValueError as ex:
+                eprint(f"Invalid {key} in {extra_env_path}: {ex}")
+                sys.exit(1)
 
     # *BUCKAL-ONLY* Restore the absolute form of the path vars the manifest
     # emitted project-relative. The build script runs with a synthetic cwd, so
@@ -380,7 +448,7 @@ def main() -> None:  # noqa: C901
             cargo_link_name = env.get("CARGO_MANIFEST_LINKS")
             if cargo_link_name:
                 key = f"DEP_{cargo_link_name.upper().replace('-', '_')}_{key.upper().replace('-', '_')}"
-                metadata[key] = value
+                metadata[key] = encode_metadata_value(value, TOOL_CWD)
                 continue
         cargo_kv_match = cargo_kv_pattern.match(line)
         if cargo_kv_match:
@@ -389,7 +457,7 @@ def main() -> None:  # noqa: C901
             cargo_link_name = env.get("CARGO_MANIFEST_LINKS")
             if cargo_link_name:
                 key = f"DEP_{cargo_link_name.upper().replace('-', '_')}_{key.upper().replace('-', '_')}"
-                metadata[key] = value
+                metadata[key] = encode_metadata_value(value, TOOL_CWD)
                 continue
         print(line, end="\n")
     args.outfile.write(flags)
