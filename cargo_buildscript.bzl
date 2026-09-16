@@ -94,10 +94,18 @@ def _make_rustc_shim(ctx: AnalysisContext, cwd: Artifact) -> cmd_args:
     else:
         sysroot_args = cmd_args()
 
+    # *BUCKAL-ONLY* On a Windows exec host the shim is a `.bat`, and cmd.exe
+    # parses a `/` in the command name as a switch: a relative, artifact-backed
+    # compiler (`../../toolchains/.../rustc.exe`) runs as `..` and fails with
+    # "'..' is not recognized". A bare `rustc` off PATH never shows it, which is
+    # why only a hermetic toolchain on a Windows host reaches this.
+    compiler = cmd_args(toolchain_info.compiler, relative_to = cwd)
+    if ctx.attrs._exec_os_type[OsLookup].os == Os("windows"):
+        compiler = cmd_args(compiler, replace_regex = ("/", "\\\\"))
     shim = cmd_script(
         actions = ctx.actions,
         name = "__rustc_shim",
-        cmd = cmd_args(toolchain_info.compiler, sysroot_args, relative_to = cwd),
+        cmd = cmd_args(compiler, cmd_args(sysroot_args, relative_to = cwd)),
         language = ctx.attrs._exec_os_type[OsLookup].script,
     )
 
