@@ -52,6 +52,18 @@ def _is_within(root: str, path: str) -> bool:
     return os.path.normcase(common) == os.path.normcase(root)
 
 
+def project_relative(path: str, root: str) -> Optional[str]:
+    """*BUCKAL-ONLY* `path` relative to `root`, or None if it is not inside.
+
+    Only an absolute path at or below `root` qualifies. The result is spelled
+    with "/" on every OS, so cached outputs that store it do not depend on the
+    producing OS; consumers absolutize it, which restores the native separator.
+    """
+    if not os.path.isabs(path) or not _is_within(root, path):
+        return None
+    return os.path.relpath(path, root).replace(os.path.sep, "/")
+
+
 def encode_metadata_value(value: str, root: str) -> Union[str, Dict[str, str]]:
     """*BUCKAL-ONLY* Keep the producing checkout's root out of METADATA.
 
@@ -68,14 +80,9 @@ def encode_metadata_value(value: str, root: str) -> Union[str, Dict[str, str]]:
     """
     # A path list parses as one absolute path whose first entry is the only
     # one rebased, so leave any value holding a list separator alone.
-    if (
-        not os.path.isabs(value)
-        or os.path.pathsep in value
-        or not _is_within(root, value)
-    ):
+    relative = None if os.path.pathsep in value else project_relative(value, root)
+    if relative is None:
         return value
-    # Always "/", so the stored bytes do not depend on the producing OS.
-    relative = os.path.relpath(value, root).replace(os.path.sep, "/")
     return {PROJECT_RELATIVE_PATH_TAG: relative}
 
 
@@ -420,8 +427,8 @@ def main() -> None:  # noqa: C901
         if cargo_rustc_env_match:
             key = cargo_rustc_env_match.group(1)
             value = cargo_rustc_env_match.group(2)
-            if value.startswith(TOOL_CWD):
-                relative_path = value[len(TOOL_CWD) :]
+            relative_path = project_relative(value, TOOL_CWD)
+            if relative_path is not None:
                 flags += f"--env-set={key}=$(abspath {relative_path})\n"
             else:
                 flags += f"--env-set={key}={value}\n"
@@ -435,8 +442,8 @@ def main() -> None:  # noqa: C901
         if cargo_rustc_link_search_match:
             kind = cargo_rustc_link_search_match.group(1) or ""
             path = cargo_rustc_link_search_match.group(2)
-            if path.startswith(TOOL_CWD):
-                relative_path = path[len(TOOL_CWD) :]
+            relative_path = project_relative(path, TOOL_CWD)
+            if relative_path is not None:
                 flags += f"-L{kind}{relative_path}\n"
             else:
                 # Disregard link-search paths that cannot be resolved from the project root.

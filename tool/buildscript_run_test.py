@@ -66,6 +66,28 @@ class TestEncodeDecode(unittest.TestCase):
         self.assertEqual(stored[0], stored[1])
         self.assertEqual(json.loads(stored[0]), {TAG: "buck-out/bzip2/include"})
 
+    def test_project_relative_is_the_same_on_every_os(self):
+        for paths, root in ((ntpath, "D:\\producer\\"), (posixpath, "/producer/")):
+            with self.subTest(paths=paths.__name__), patch.object(
+                runner.os, "path", paths
+            ):
+                self.assertEqual(
+                    runner.project_relative(paths.join(root, "out", "lib"), root),
+                    "out/lib",
+                )
+                self.assertIsNone(
+                    runner.project_relative(
+                        paths.join(root.rstrip("\\/") + "_old", "lib"), root
+                    )
+                )
+                self.assertIsNone(runner.project_relative("out", root))
+        with patch.object(runner.os, "path", ntpath):
+            for spelled in ("D:/producer/out/lib", "d:\\PRODUCER\\out\\lib"):
+                with self.subTest(spelled=spelled):
+                    self.assertEqual(
+                        runner.project_relative(spelled, "D:\\producer\\"), "out/lib"
+                    )
+
     def test_windows_consumer_gets_a_native_path(self):
         with patch.object(runner.os, "path", ntpath):
             self.assertEqual(
@@ -165,7 +187,52 @@ class TestMain(unittest.TestCase):
             },
         ):
             runner.main()
+        self.flags = args.outfile.getvalue()
         return json.loads(outenv.getvalue()), outenv.getvalue()
+
+    def test_flag_paths_are_project_relative_with_forward_slashes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generated = root / "out" / "gen.rs"
+            lib = root / "out" / "lib"
+            self.run_main(
+                root,
+                [],
+                f"cargo:rustc-env=GENERATED={generated}\n"
+                f"cargo::rustc-link-search=native={lib}\n"
+                f"cargo:rustc-link-search={lib}\n",
+            )
+            self.assertIn("--env-set=GENERATED=$(abspath out/gen.rs)\n", self.flags)
+            self.assertIn("-Lnative=out/lib\n", self.flags)
+            self.assertIn("-Lout/lib\n", self.flags)
+            self.assertNotIn(str(root), self.flags)
+            # Expanded against the consuming root, as rustc_action.py does.
+            self.assertEqual(
+                os.path.abspath(os.path.join(root, "out/gen.rs")), str(generated)
+            )
+
+    def test_root_spelled_with_forward_slashes_is_inside(self):
+        # Native build tools on Windows often print `D:/...`; a string prefix
+        # match against `D:\...` missed it and dropped the search path.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spelled = str(root).replace("\\", "/") + "/out/lib"
+            self.run_main(root, [], f"cargo:rustc-link-search=native={spelled}\n")
+            self.assertEqual(self.flags, "-Lnative=out/lib\n")
+
+    def test_sibling_with_root_as_string_prefix_is_outside(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sibling = Path(f"{root}_old")
+            self.run_main(
+                root,
+                [],
+                f"cargo:rustc-env=GENERATED={sibling / 'gen.rs'}\n"
+                f"cargo:rustc-link-search=native={sibling / 'lib'}\n",
+            )
+            self.assertIn(f"--env-set=GENERATED={sibling / 'gen.rs'}\n", self.flags)
+            self.assertNotIn("$(abspath", self.flags)
+            self.assertNotIn("-L", self.flags)
 
     def test_both_syntaxes_are_encoded(self):
         with tempfile.TemporaryDirectory() as temporary:
