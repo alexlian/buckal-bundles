@@ -141,6 +141,17 @@ def rust_test(name, **kwargs):
     crate_name = kwargs.get("crate")
     env = kwargs.get("env", {})
     env.update(CARGO_CRATE_NAME=crate_name)
+    # Scope the test binary's cache entry to the checkout that built it. The
+    # prelude's rustc_action.py makes every path-valued env var absolute inside
+    # the action (CARGO_MANIFEST_DIR, CARGO_BIN_EXE_*), so a test that reads one
+    # through env!() embeds the producing checkout's root, while the action
+    # digest holds only the relative form. Without a scope, a shared action
+    # cache serves one checkout a test that spawns or reads paths in another.
+    # The value joins the digest as a plain env var; checkouts with the same
+    # root still share. Unset, the test is unscoped, as upstream.
+    test_cache_scope = read_config("buckal", "test_cache_scope", "")
+    if test_cache_scope:
+        env.update(BUCKAL_TEST_CACHE_SCOPE=test_cache_scope)
     kwargs.update(env=env)
     platform = kwargs.pop("platform", {})
     kwargs = apply_platform_attrs(platform, kwargs)
