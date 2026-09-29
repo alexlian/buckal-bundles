@@ -69,22 +69,31 @@ def _set_profile_flag(**kwargs):
     return rustc_flags
 
 def _patch_buildscript_env(**kwargs):
+    # The mode's profile values, as cargo would set them for the build script.
+    # A value the target sets itself wins -- the per-package override cargo
+    # expresses as `[profile.<p>.package.<name>]` (e.g. `DEBUG = "0"` to build
+    # a C/C++ dependency without debug info).
     env = kwargs.get("env", {})
-    env.update(OPT_LEVEL=select({
-        "buckal//config/mode:debug": "0",
-        "buckal//config/mode:release": "3",
-        "DEFAULT": "0",
-    }))
-    env.update(DEBUG=select({
-        "buckal//config/mode:debug": "1",
-        "buckal//config/mode:release": "0",
-        "DEFAULT": "1",
-    }))
-    env.update(PROFILE=select({
-        "buckal//config/mode:debug": "debug",
-        "buckal//config/mode:release": "release",
-        "DEFAULT": "debug",
-    }))
+    defaults = {
+        "OPT_LEVEL": select({
+            "buckal//config/mode:debug": "0",
+            "buckal//config/mode:release": "3",
+            "DEFAULT": "0",
+        }),
+        "DEBUG": select({
+            "buckal//config/mode:debug": "1",
+            "buckal//config/mode:release": "0",
+            "DEFAULT": "1",
+        }),
+        "PROFILE": select({
+            "buckal//config/mode:debug": "debug",
+            "buckal//config/mode:release": "release",
+            "DEFAULT": "debug",
+        }),
+    }
+    for key, value in defaults.items():
+        if key not in env:
+            env[key] = value
     return env
 
 def rust_binary(name, **kwargs):
