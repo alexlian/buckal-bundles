@@ -316,6 +316,43 @@ def normalize_project_relative_tool_paths(env: Dict[str, str]) -> None:
             env[key] = os.path.abspath(candidate)
 
 
+# *BUCKAL-ONLY* The CFLAGS-family names the `cc` crate consults, most specific
+# first; it uses the first one set and ignores the rest.
+def _flag_env_names(base: str, target: str) -> list[str]:
+    return [
+        f"{base}_{target}",
+        f"{base}_{target.replace('-', '_')}",
+        f"TARGET_{base}",
+        f"HOST_{base}",
+        base,
+    ]
+
+
+def trim_msvc_source_root(env: Dict[str, str], target: str, root: str) -> None:
+    """*BUCKAL-ONLY* Make `__FILE__` in cl.exe objects project-relative.
+
+    A C/C++ `__FILE__` (assert, error-location macros) embeds the absolute
+    source path in the object's data, so a binary linked from it differs by
+    checkout root. gcc/clang crates commonly pass `-ffile-prefix-map`; cl-like
+    compilers need `/d1trimfile:<prefix>`, and only this runner knows the root
+    at action time. The flag is appended to every CFLAGS/CXXFLAGS-family name
+    already set and to the plain name, so whichever `cc` picks carries it
+    (`HOST_*` is skipped when cross-compiling). `cc` splits these on whitespace, so a root containing whitespace
+    is left untrimmed rather than passed as a broken flag.
+    """
+    if not target.endswith("-msvc"):
+        return
+    if any(c.isspace() for c in root):
+        eprint(f"buildscript_run: not trimming __FILE__ -- project root {root!r} contains whitespace")
+        return
+    flag = "/d1trimfile:" + os.path.join(root, "")
+    for base in ("CFLAGS", "CXXFLAGS"):
+        names = [n for n in _flag_env_names(base, target) if n in env and n != base]
+        for name in names + [base]:
+            current = env.get(name, "")
+            env[name] = f"{current} {flag}" if current else flag
+
+
 class Args(NamedTuple):
     buildscript: str
     rustc_cfg: Path
@@ -396,6 +433,8 @@ def main() -> None:  # noqa: C901
         with args.rustc_host_tuple.open(encoding="utf-8") as f:
             target = f.read().strip()
             env["TARGET"] = target
+
+    trim_msvc_source_root(env, target, TOOL_CWD)
 
     ensure_rustc_available(
         env=env,

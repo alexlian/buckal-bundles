@@ -156,7 +156,7 @@ class TestEncodeDecode(unittest.TestCase):
 
 
 class TestMain(unittest.TestCase):
-    def run_main(self, root, extra_env, script_output, on_env=lambda env: None):
+    def run_main(self, root, extra_env, script_output, on_env=lambda env: None, target="test"):
         outenv = io.StringIO()
         args = SimpleNamespace(
             extra_env=[str(p) for p in extra_env],
@@ -182,7 +182,7 @@ class TestMain(unittest.TestCase):
             os.environ,
             {
                 "OUT_DIR": str(root / "out"),
-                "TARGET": "test",
+                "TARGET": target,
                 "CARGO_MANIFEST_LINKS": "bzip2",
             },
         ):
@@ -294,6 +294,65 @@ class TestMain(unittest.TestCase):
                 self.run_main(root, [incoming], "")
             self.assertEqual(exit_.exception.code, 1)
             self.assertIn("DEP_BZIP2_INCLUDE", eprint.call_args[0][0])
+
+    def test_msvc_build_script_sees_the_root_trim(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seen = {}
+            with patch.dict(os.environ, {}, clear=False):
+                for name in ("CFLAGS", "CXXFLAGS"):
+                    os.environ.pop(name, None)
+                self.run_main(
+                    root, [], "", on_env=seen.update, target="x86_64-pc-windows-msvc"
+                )
+            flag = "/d1trimfile:" + os.path.join(str(root), "")
+            self.assertEqual(seen["CFLAGS"], flag)
+            self.assertEqual(seen["CXXFLAGS"], flag)
+
+
+class TestTrimMsvcSourceRoot(unittest.TestCase):
+    ROOT = "D:\\ws\\"
+    FLAG = "/d1trimfile:D:\\ws\\"
+    TARGET = "x86_64-pc-windows-msvc"
+
+    def test_plain_names_are_set_when_nothing_is(self):
+        env = {}
+        runner.trim_msvc_source_root(env, self.TARGET, self.ROOT)
+        self.assertEqual(env, {"CFLAGS": self.FLAG, "CXXFLAGS": self.FLAG})
+
+    def test_every_set_name_keeps_its_value_and_gains_the_flag(self):
+        # `cc` reads the most specific name set; each one must carry the flag.
+        env = {
+            "CFLAGS_x86_64-pc-windows-msvc": "/W3",
+            "CFLAGS_x86_64_pc_windows_msvc": "/W3",
+            "TARGET_CFLAGS": "/W3",
+            "HOST_CFLAGS": "/W3",
+            "CFLAGS": "/W4",
+        }
+        runner.trim_msvc_source_root(env, self.TARGET, self.ROOT)
+        for name, value in env.items():
+            if name.startswith(("CXX",)):
+                continue
+            self.assertTrue(value.endswith(" " + self.FLAG), name)
+            self.assertTrue(value.startswith("/W"), name)
+
+    def test_non_msvc_targets_are_untouched(self):
+        for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-gnu", "aarch64-apple-darwin"):
+            env = {"CFLAGS": "-O2"}
+            runner.trim_msvc_source_root(env, target, self.ROOT)
+            self.assertEqual(env, {"CFLAGS": "-O2"}, target)
+
+    def test_root_with_whitespace_is_left_untrimmed(self):
+        env = {}
+        with patch.object(runner, "eprint") as eprint:
+            runner.trim_msvc_source_root(env, self.TARGET, "C:\\My Work\\ws\\")
+        self.assertEqual(env, {})
+        self.assertIn("whitespace", eprint.call_args[0][0])
+
+    def test_root_without_trailing_separator_gets_one(self):
+        env = {}
+        runner.trim_msvc_source_root(env, self.TARGET, os.path.join("D:", "ws"))
+        self.assertTrue(env["CFLAGS"].endswith(os.sep))
 
 
 if __name__ == "__main__":
