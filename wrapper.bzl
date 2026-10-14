@@ -60,9 +60,29 @@ def _first_party_rust_library(name, platform = {}, **kwargs):
 
     native.rust_library(name = name, **kwargs)
 
+# Debug-mode opt-level for vendored crates -- cargo's
+# `[profile.dev.package."*"] opt-level = N` idiom: dependencies are compiled
+# optimized while first-party code stays at 0, so a debug build doesn't pay
+# for unoptimized dependencies at run time. Release mode and first-party
+# crates are unaffected. `-c buckal.third_party_opt_level=0` restores level 0,
+# with the same rustc flags as before this setting existed.
+def _third_party_debug_opt_level():
+    return read_root_config("buckal", "third_party_opt_level", "1")
+
+def _debug_profile_flags():
+    if not _is_third_party():
+        return ["-Copt-level=0"]
+    level = _third_party_debug_opt_level()
+    if level == "0":
+        return ["-Copt-level=0"]
+    # Above level 0 rustc turns debug assertions off by default; cargo keeps
+    # them on (they come from the profile, not the opt-level). Keep them on so
+    # this setting changes codegen only, not which checks run.
+    return ["-Copt-level=" + level, "-Cdebug-assertions=on"]
+
 def _set_profile_flag(**kwargs):
     rustc_flags = kwargs.get("rustc_flags", []) + select({
-        "buckal//config/mode:debug": ["-Copt-level=0"],
+        "buckal//config/mode:debug": _debug_profile_flags(),
         "buckal//config/mode:release": ["-Copt-level=3"],
         "DEFAULT": [],
     })
@@ -74,9 +94,13 @@ def _patch_buildscript_env(**kwargs):
     # expresses as `[profile.<p>.package.<name>]` (e.g. `DEBUG = "0"` to build
     # a C/C++ dependency without debug info).
     env = kwargs.get("env", {})
+    debug_opt_level = _third_party_debug_opt_level() if _is_third_party() else "0"
     defaults = {
+        # Cargo gives a build script the opt-level of the package it builds
+        # for, so a vendored package's script sees the third-party level and
+        # C/C++ it compiles through `cc` is optimized to match.
         "OPT_LEVEL": select({
-            "buckal//config/mode:debug": "0",
+            "buckal//config/mode:debug": debug_opt_level,
             "buckal//config/mode:release": "3",
             "DEFAULT": "0",
         }),
