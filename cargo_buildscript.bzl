@@ -85,7 +85,7 @@ def _make_rustc_shim(ctx: AnalysisContext, cwd: Artifact) -> cmd_args:
 
         null_path = "nul" if ctx.attrs._exec_os_type[OsLookup].os == Os("windows") else "/dev/null"
         dep_args = cmd_args("--sysroot=" + null_path, dep_args, relative_to = cwd)
-        dep_file, _ = ctx.actions.write("rustc_dep_file", dep_args, allow_args = True)
+        dep_file, _ = ctx.actions.write("rustc_dep_file", dep_args, allow_args = True, has_content_based_path = False)
         sysroot_args = cmd_args(
             cmd_args("@", dep_file, delimiter = "", hidden = dep_args),
             # add dep_argsfiles as a separate argument because rustc does NOT support nested @argsfiles
@@ -199,6 +199,7 @@ def _make_cc_shim(ctx: AnalysisContext, name: str, cmd: cmd_args) -> cmd_args:
             ],
             is_executable = True,
             allow_args = True,
+            has_content_based_path = False,
         )
     elif language == ScriptLanguage("bat"):
         script = ctx.actions.declare_output("{}.bat".format(name), has_content_based_path = False)
@@ -229,6 +230,7 @@ def _make_cc_shim(ctx: AnalysisContext, name: str, cmd: cmd_args) -> cmd_args:
             ],
             is_executable = True,
             allow_args = True,
+            has_content_based_path = False,
         )
     else:
         fail(language)
@@ -242,11 +244,11 @@ def _cargo_buildscript_impl(ctx: AnalysisContext) -> list[Provider]:
     # The build script mutates this working directory. Keep it on the
     # configured-target path so concurrent configurations do not share the
     # content-based output staging directory while Buck snapshots it.
-    cwd = ctx.actions.declare_output("cwd", dir = True)
-    out_dir = ctx.actions.declare_output("OUT_DIR", dir = True)
+    cwd = ctx.actions.declare_output("cwd", dir = True, has_content_based_path = False)
+    out_dir = ctx.actions.declare_output("OUT_DIR", dir = True, has_content_based_path = False)
     rustc_flags = ctx.actions.declare_output("rustc_flags", has_content_based_path = True)
     # *BUCKAL-ONLY* metadata environment variables for *dependent* buildscript runners to consume
-    metadata = ctx.actions.declare_output("METADATA")
+    metadata = ctx.actions.declare_output("METADATA", has_content_based_path = False)
 
     if ctx.attrs.manifest_dir != None:
         manifest_dir = ctx.attrs.manifest_dir[DefaultInfo].default_outputs[0]
